@@ -140,7 +140,7 @@ set.seed(1234)
 for(i in 1:nrow(real_params)) {
   mu <- rnorm(n = 1, mean = 0.03, sd = 0.008)
   sigma2 <- runif(n = 1, min = 5e-6, max = 2e-5)
-  foi <- RW(8, x0 = 0.03, mu = 0, variance = 1e-5)
+  foi <- RW(8, x0 = 0.03, mu = mu, variance = sigma2)
   real_params$lambda_1[i] <- foi[1]
   real_params$lambda_2[i] <- foi[2]
   real_params$lambda_3[i] <- foi[3]
@@ -197,9 +197,18 @@ for (i in 1:n_trials) {
 }
 Sys.time() - t0
 
+ret <- res_list %>%
+  bind_rows()
+row.names(ret) <- NULL
+ret$inside <- (ret$true > ret$`2.5%`) & (ret$true < ret$`97.5%`)
 
+# count times correct
+ret_count <- ret %>%
+  group_by(param) %>%
+  summarise(inside = sum(inside))
 
-
-
+exp <- ret %>% dplyr::filter(param == "sigma2") %>%
+  dplyr::mutate(estimate_div_true = `50%`/true) 
+mean(exp$estimate_div_true)
 
 
