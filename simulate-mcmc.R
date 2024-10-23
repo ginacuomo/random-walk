@@ -1,12 +1,52 @@
-## try and simulate data for a control arm from a random walk and then fit an MCMC returning the mean and sd
+# simulate-mcmc.R
+#
+# Author: Gina Cuomo-Dannenburg
+# Date: 2024-10-23
+#
+# Inputs: (none)
+#
+# Outputs: (none)
+#
+# Purpose:
+# Try and simulate data for a control arm from a random walk and then fit an
+# MCMC returning the mean and sd.
+#
+# BOB CHANGES TO CODE
+# - in simulate_trial_arm, given drug_arm default value NA rather than commenting out, as this parameter is used in the function
+# - in simulate_trial_arm, the expression rbinom(1, N_remaining, 1 - exp(-prob_susceptible[i] * lambda)) was missing the lambda[i] index, meaning it won't pull the correct values.
+# - changed RW function so values are reflected around zero, i.e. cannot generate negative values
+# - swapped pipe symbol from %>% to |> (just because I'm pedantic!)
+# - simplified definition and extraction of values lambda_1, lambda_2 etc. using sprintf
+# - random walk simulator (RW function) used x0 as intercept and mu as drift term. But prior used mu as intercept with no drift term. Modified params data.frame and prior function to have x0 intercept and mu drift term
+# - random walk simulator used t*mu drift term, where t=1:N. But this applies drift even to the first observation, i.e. intercept becomes x0 + mu. Changed so t effectively starts at 0 meaning intercept is x0 (easier to interpret)
+# - changed range of some parameters in df_params to start at zero, rather than starting at arbitrarily low values. It's fine for the range to go all the way down to zero, we don't have to worry about the MCMC reaching values of exactly zero (this will never happen)
+# - THE MOST IMPORTANT CHANGE! logprior forgot to log the normal density (we've all been here)!
+#
+# ------------------------------------------------------------------
+#devtools::install_github("mrc-ide/drjacoby@v1.5.4")
+library(drjacoby)
+library(dplyr)
+library(ggplot2)
 
+# draw from a random walk with drift
+RW <- function(N, x0, mu, variance) {
+  z <- rep(0, N)
+  z[1] <- abs(rnorm(1, mean = x0, sd = sqrt(variance)))
+  for (i in 2:N) {
+    z[i] <- abs(rnorm(1, mean = z[i-1] + mu, sd = sqrt(variance)))
+  }
+  return(z)
+}
+
+# simulate one arm of a trial
 simulate_trial_arm <- function(N_patients, 
                                max_time, 
-                               # drug_arm, 
-                               lambda_vec) {
+                               lambda_vec,
+                               drug_arm = NA) {
+  
   times <- seq(1, max_time, by = 1)
   # if(drug_arm == 0) {
-    prob_susceptible <- rep(1, length(times))
+  prob_susceptible <- rep(1, length(times))
   # } else {
   #   prob_susceptible <- 1 - weibull(time = times,
   #                                   alpha = alpha,
@@ -24,7 +64,7 @@ simulate_trial_arm <- function(N_patients,
   
   for(i in 1:nrow(df)) {
     df$n_sus[i] <- N_remaining
-    df$n_inf[i] <- rbinom(1, N_remaining, 1 - exp(-prob_susceptible[i] * lambda))
+    df$n_inf[i] <- rbinom(1, N_remaining, 1 - exp(-prob_susceptible[i] * lambda[i]))
     df$cum_inf[i] <- sum(df$n_inf[1:i])
     N_remaining <- N_patients - df$cum_inf[i]
   }
@@ -36,86 +76,61 @@ simulate_trial_arm <- function(N_patients,
 r_loglike <- function(params, data, misc) {
   
   # extract parameter values
-  lambda_1 <- params["lambda_1"]
-  lambda_2 <- params["lambda_2"]
-  lambda_3 <- params["lambda_3"]
-  lambda_4 <- params["lambda_4"]
-  lambda_5 <- params["lambda_5"]
-  lambda_6 <- params["lambda_6"]
-  lambda_7 <- params["lambda_7"]
-  lambda_8 <- params["lambda_8"]
-  lambda <- c(rep(c(lambda_1, lambda_2, lambda_3, lambda_4, 
-                    lambda_5, lambda_6, lambda_7, lambda_8), 
-                  each = 7))[1:max_time]
+  params_lambda <- params[sprintf("lambda_%s", 1:8)]
+  lambda <- rep(params_lambda, each = 7)[1:max_time]
   
   ret <- 
     sum(dbinom(x = data$control_n_inf,
                size = data$control_n_sus,
                prob = 1 - exp(-lambda),
                log = TRUE)) #+
-    # sum(dbinom(x = data$spaq_n_inf,
-    #            size = data$spaq_n_sus,
-    #            prob = 1 - exp(-lambda_spaq),
-    #            log = TRUE)) +
-    # sum(dbinom(x = data$dhapq_n_inf,
-    #            size = data$dhapq_n_sus,
-    #            prob = 1 - exp(-lambda_dhapq),
-    #            log = TRUE))
+  # sum(dbinom(x = data$spaq_n_inf,
+  #            size = data$spaq_n_sus,
+  #            prob = 1 - exp(-lambda_spaq),
+  #            log = TRUE)) +
+  # sum(dbinom(x = data$dhapq_n_inf,
+  #            size = data$dhapq_n_sus,
+  #            prob = 1 - exp(-lambda_dhapq),
+  #            log = TRUE))
   
   return(ret)
 }
 
+# logprior
 r_logprior <- function(params, misc) {
   
   # extract parameter values
-  lambda_1 <- params["lambda_1"]
-  lambda_2 <- params["lambda_2"]
-  lambda_3 <- params["lambda_3"]
-  lambda_4 <- params["lambda_4"]
-  lambda_5 <- params["lambda_5"]
-  lambda_6 <- params["lambda_6"]
-  lambda_7 <- params["lambda_7"]
-  lambda_8 <- params["lambda_8"]
+  params_lambda <- params[sprintf("lambda_%s", 1:8)]
+  x0 <- params["x0"]
   mu <- params["mu"]
   sigma2 <- params["sigma2"]
   
-  # normal distribution based on a 
-  ret <- 
-    dnorm(lambda_1, mu, sqrt(sigma2)) + 
-    dnorm(lambda_2, lambda_1, sqrt(sigma2)) + 
-    dnorm(lambda_3, lambda_2, sqrt(sigma2)) + 
-    dnorm(lambda_4, lambda_3, sqrt(sigma2)) + 
-    dnorm(lambda_5, lambda_4, sqrt(sigma2)) + 
-    dnorm(lambda_6, lambda_5, sqrt(sigma2)) + 
-    dnorm(lambda_7, lambda_6, sqrt(sigma2)) + 
-    dnorm(lambda_8, lambda_7, sqrt(sigma2))
+  # normal distribution based on a random walk
+  ret <- dnorm(params_lambda[1], mean = x0, sd = sqrt(sigma2), log = TRUE)
+  for (i in 2:length(params_lambda)) {
+    ret <- ret + dnorm(params_lambda[i], mean = params_lambda[i-1] + mu, sd = sqrt(sigma2), log = TRUE)
+  }
+  
   return(ret)
 }
 
-df_params <- define_params(name = "lambda_1", min = 1e-3, max = 1,
-                           name = "lambda_2", min = 1e-3, max = 1,
-                           name = "lambda_3", min = 1e-3, max = 1,
-                           name = "lambda_4", min = 1e-3, max = 1,
-                           name = "lambda_5", min = 1e-3, max = 1,
-                           name = "lambda_6", min = 1e-3, max = 1,
-                           name = "lambda_7", min = 1e-3, max = 1,
-                           name = "lambda_8", min = 1e-3, max = 1,
-                           name = "mu", min = 1e-3, max = 1,
-                           name = "sigma2", min = 1e-10, max = 3)
+# setup parameters data.frame
+df_params <- data.frame(name = sprintf("lambda_%s", 1:8), min = 0, max = 1) |>
+  bind_rows(define_params(name = "x0", min = 0, max = 1,
+                          name = "mu", min = 0, max = 1,
+                          name = "sigma2", min = 0, max = 1))
 
 # simulate a trial
-RW <- function(N, x0, mu, variance) {
-  z <- cumsum(rnorm(n = N, mean = 0, 
-                    sd = sqrt(variance)))
-  t <- 1:N
-  x <- x0 + t*mu + z
-  return(x)
-}
+#set.seed(123)
+foi <- RW(8, x0 = 0.05, mu = 0.01, variance = 1e-4)
+control <- simulate_trial_arm(N_patients = 1000,
+                              max_time = 56,
+                              lambda_vec = foi)
 
-set.seed(123)
-foi <- RW(8, x0 = 0.01, mu = 0, variance = 1e-5)
-control <- simulate_trial_arm(1000, 56, foi)
+# quick KM plot of trial
+plot(control$days_since_dose, control$n_sus, type = "s", ylim = c(0, max(control$n_sus)))
 
+# run MCMC
 start <- Sys.time()
 out_mcmc <- run_mcmc(data = list(control_n_sus = control$n_sus,
                                  control_n_inf = control$n_inf),
@@ -124,13 +139,22 @@ out_mcmc <- run_mcmc(data = list(control_n_sus = control$n_sus,
                      logprior = r_logprior,
                      burnin = 1e3,
                      samples = 1e3,
-                     chains = 5,
-                     silent = TRUE)
+                     chains = 1)
 Sys.time() - start
-q95 <- out_mcmc$output %>%
-  filter(phase == "sampling") %>%
-  select(-c(chain, phase, iteration, logprior, loglikelihood)) %>%
-  apply(2, quantile_95) %>%
+
+# plot CrIs on lambda
+lambda_names <- sprintf("lambda_%s", 1:8)
+drjacoby::plot_credible(out_mcmc, show = lambda_names) +
+  geom_point(aes(x = param, y = value), data.frame(param = lambda_names, value = foi), col = "red")
+
+# ------------------------------------------------------------------------------------------------
+# BOB STOPPED EDITING
+
+# get CrIs
+q95 <- out_mcmc$output |>
+  filter(phase == "sampling") |>
+  select(-c(chain, phase, iteration, logprior, loglikelihood)) |>
+  apply(2, drjacoby:::quantile_95) |>
   as.data.frame()
 
 ## now simulate 100 control datasets and estimate the power with which it estimates mu and sigma2
@@ -182,32 +206,32 @@ for (i in 1:n_trials) {
   # plot_par(out_mcmc, phase = "both")
   
   # get CrIs
-  q95 <- out_mcmc$output %>%
-    filter(phase == "sampling") %>%
-    select(-c(chain, phase, iteration, logprior, loglikelihood)) %>%
-    apply(2, quantile_95) %>%
+  q95 <- out_mcmc$output |>
+    filter(phase == "sampling") |>
+    select(-c(chain, phase, iteration, logprior, loglikelihood)) |>
+    apply(2, quantile_95) |>
     as.data.frame()
   
   # wrangle and store results
-  res_list[[i]] <- t(q95) %>%
-    as.data.frame() %>%
+  res_list[[i]] <- t(q95) |>
+    as.data.frame() |>
     mutate(true = c(unlist(real_params[i,])),
            sim = i,
            param = names(q95))
 }
 Sys.time() - t0
 
-ret <- res_list %>%
+ret <- res_list |>
   bind_rows()
 row.names(ret) <- NULL
 ret$inside <- (ret$true > ret$`2.5%`) & (ret$true < ret$`97.5%`)
 
 # count times correct
-ret_count <- ret %>%
-  group_by(param) %>%
+ret_count <- ret |>
+  group_by(param) |>
   summarise(inside = sum(inside))
 
-exp <- ret %>% dplyr::filter(param == "sigma2") %>%
+exp <- ret |> dplyr::filter(param == "sigma2") |>
   dplyr::mutate(estimate_div_true = `50%`/true) 
 mean(exp$estimate_div_true)
 
