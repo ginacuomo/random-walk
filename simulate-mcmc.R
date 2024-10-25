@@ -11,19 +11,8 @@
 # Try and simulate data for a control arm from a random walk and then fit an
 # MCMC returning the mean and sd.
 #
-# BOB CHANGES TO CODE
-# - in simulate_trial_arm, given drug_arm default value NA rather than commenting out, as this parameter is used in the function
-# - in simulate_trial_arm, the expression rbinom(1, N_remaining, 1 - exp(-prob_susceptible[i] * lambda)) was missing the lambda[i] index, meaning it won't pull the correct values.
-# - changed RW function so values are reflected around zero, i.e. cannot generate negative values
-# - swapped pipe symbol from %>% to |> (just because I'm pedantic!)
-# - simplified definition and extraction of values lambda_1, lambda_2 etc. using sprintf
-# - random walk simulator (RW function) used x0 as intercept and mu as drift term. But prior used mu as intercept with no drift term. Modified params data.frame and prior function to have x0 intercept and mu drift term
-# - random walk simulator used t*mu drift term, where t=1:N. But this applies drift even to the first observation, i.e. intercept becomes x0 + mu. Changed so t effectively starts at 0 meaning intercept is x0 (easier to interpret)
-# - changed range of some parameters in df_params to start at zero, rather than starting at arbitrarily low values. It's fine for the range to go all the way down to zero, we don't have to worry about the MCMC reaching values of exactly zero (this will never happen)
-# - THE MOST IMPORTANT CHANGE! logprior forgot to log the normal density (we've all been here)!
-#
 # ------------------------------------------------------------------
-#devtools::install_github("mrc-ide/drjacoby@v1.5.4")
+# devtools::install_github("mrc-ide/drjacoby@v1.5.4")
 library(drjacoby)
 library(dplyr)
 library(ggplot2)
@@ -83,15 +72,7 @@ r_loglike <- function(params, data, misc) {
     sum(dbinom(x = data$control_n_inf,
                size = data$control_n_sus,
                prob = 1 - exp(-lambda),
-               log = TRUE)) #+
-  # sum(dbinom(x = data$spaq_n_inf,
-  #            size = data$spaq_n_sus,
-  #            prob = 1 - exp(-lambda_spaq),
-  #            log = TRUE)) +
-  # sum(dbinom(x = data$dhapq_n_inf,
-  #            size = data$dhapq_n_sus,
-  #            prob = 1 - exp(-lambda_dhapq),
-  #            log = TRUE))
+               log = TRUE)) 
   
   return(ret)
 }
@@ -108,7 +89,9 @@ r_logprior <- function(params, misc) {
   # normal distribution based on a random walk
   ret <- dnorm(params_lambda[1], mean = x0, sd = sqrt(sigma2), log = TRUE)
   for (i in 2:length(params_lambda)) {
-    ret <- ret + dnorm(params_lambda[i], mean = params_lambda[i-1] + mu, sd = sqrt(sigma2), log = TRUE)
+    ret <- ret + dnorm(params_lambda[i], 
+                       mean = params_lambda[i-1] + mu, 
+                       sd = sqrt(sigma2), log = TRUE)
   }
   
   return(ret)
@@ -126,6 +109,7 @@ foi <- RW(8, x0 = 0.05, mu = 0.01, variance = 1e-4)
 control <- simulate_trial_arm(N_patients = 1000,
                               max_time = 56,
                               lambda_vec = foi)
+max_time <- 56
 
 # quick KM plot of trial
 plot(control$days_since_dose, control$n_sus, type = "s", ylim = c(0, max(control$n_sus)))
@@ -139,17 +123,13 @@ out_mcmc <- run_mcmc(data = list(control_n_sus = control$n_sus,
                      logprior = r_logprior,
                      burnin = 1e3,
                      samples = 1e3,
-                     chains = 1)
+                     chains = 5)
 Sys.time() - start
 
 # plot CrIs on lambda
 lambda_names <- sprintf("lambda_%s", 1:8)
 drjacoby::plot_credible(out_mcmc, show = lambda_names) +
   geom_point(aes(x = param, y = value), data.frame(param = lambda_names, value = foi), col = "red")
-
-# ------------------------------------------------------------------------------------------------
-# BOB STOPPED EDITING
-
 # get CrIs
 q95 <- out_mcmc$output |>
   filter(phase == "sampling") |>
@@ -157,12 +137,16 @@ q95 <- out_mcmc$output |>
   apply(2, drjacoby:::quantile_95) |>
   as.data.frame()
 
+# POWER ANALYSIS
+# ------------------------------------------------------------------------------------------------
+# TODO: check the syntax switch from mu --> x0
+
 ## now simulate 100 control datasets and estimate the power with which it estimates mu and sigma2
 n_trials <- 1e2
 real_params <- data.frame(lambda_1 = rep(0, n_trials))
-set.seed(1234)
 for(i in 1:nrow(real_params)) {
-  mu <- rnorm(n = 1, mean = 0.03, sd = 0.008)
+  x0 <- rnorm(n = 1, mean = 0.03, sd = 0.008)
+  mu <- rnorm(n = 1, mean = 0.01, sd = 1e-4)
   sigma2 <- runif(n = 1, min = 5e-6, max = 2e-5)
   foi <- RW(8, x0 = 0.03, mu = mu, variance = sigma2)
   real_params$lambda_1[i] <- foi[1]
@@ -173,6 +157,7 @@ for(i in 1:nrow(real_params)) {
   real_params$lambda_6[i] <- foi[6]
   real_params$lambda_7[i] <- foi[7]
   real_params$lambda_8[i] <- foi[8]
+  real_params$x0[i] <- x0
   real_params$mu[i] <- mu
   real_params$sigma2[i] <- sigma2
 }
@@ -209,7 +194,7 @@ for (i in 1:n_trials) {
   q95 <- out_mcmc$output |>
     filter(phase == "sampling") |>
     select(-c(chain, phase, iteration, logprior, loglikelihood)) |>
-    apply(2, quantile_95) |>
+    apply(2, drjacoby:::quantile_95) |>
     as.data.frame()
   
   # wrangle and store results
@@ -224,15 +209,15 @@ Sys.time() - t0
 ret <- res_list |>
   bind_rows()
 row.names(ret) <- NULL
-ret$inside <- (ret$true > ret$`2.5%`) & (ret$true < ret$`97.5%`)
+ret$inside <- (ret$true > ret$Q2.5) & (ret$true < ret$Q97.5)
 
-# count times correct
+# count times correct - this is the power to accurately estimate parameters 
 ret_count <- ret |>
   group_by(param) |>
-  summarise(inside = sum(inside))
+  summarise(inside = sum(inside)) |>
+  dplyr::rowwise() |>
+  dplyr::filter(grepl("lambda", param))
 
-exp <- ret |> dplyr::filter(param == "sigma2") |>
-  dplyr::mutate(estimate_div_true = `50%`/true) 
-mean(exp$estimate_div_true)
-
+ggplot(data = ret_count, (aes(x = param, y = inside))) + geom_point() + 
+  geom_hline(yintercept = 95, lty = 2) + theme_bw() + ylim(c(90, 100))
 
